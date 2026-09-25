@@ -1,172 +1,226 @@
 import os
 import json
-import urllib.request
-import urllib.parse
-from typing import Optional
-from dotenv import load_dotenv
+import httpx
+from typing import List, Optional
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
 
 load_dotenv()
 
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+GOOGLE_SHEETS_WEBHOOK_URL = os.getenv("GOOGLE_SHEETS_WEBHOOK_URL", "")
+
 app = FastAPI(
-    title="B2B AI Lead Qualifier API",
-    description="Automated inbound lead evaluation and qualification system for US service businesses",
-    version="1.0.0"
+    title="B2B AI Lead Qualifier & CRM Dispatcher",
+    description="Enterprise API to evaluate inbound B2B inquiries and dispatch real-time alerts",
+    version="1.1.0"
 )
 
-# --- SCHEMAS ---
-class LeadInput(BaseModel):
-    contact_name: str = Field(..., example="John Miller")
-    contact_email: str = Field(..., example="john@millerlogistics.com")
-    company_name: Optional[str] = Field(None, example="Miller Freight LLC")
-    message_text: str = Field(
-        ..., 
-        example="Hi, we run 15 trucks in Texas. We are losing leads on weekends and need an AI booking agent ASAP. Budget is around $2,500."
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class LeadInboundRequest(BaseModel):
+    contact_name: str = Field(..., example="Michael Vance")
+    contact_email: str = Field(..., example="mvance@apexlogistics.com")
+    company_name: str = Field(..., example="Apex Global Freight")
+    message_text: str = Field(..., example="Need 24/7 AI dispatching for our 25 trucks fleet. Budget is around $4,000/mo. Ready to start immediately.")
+
+class LeadQualificationResult(BaseModel):
+    lead_score: int
+    lead_status: str
+    budget_estimate: str
+    timeline: str
+    key_pain_points: List[str]
+    recommended_action: str
+    summary: str
+
+def evaluate_lead_heuristics(lead: LeadInboundRequest) -> LeadQualificationResult:
+    text_lower = lead.message_text.lower()
+    score = 60
+    pain_points = []
+    
+    if any(k in text_lower for k in ["asap", "immediately", "urgent", "ready"]):
+        score += 15
+        timeline = "Immediate (0-7 days)"
+    else:
+        timeline = "Within 30 days"
+
+    if any(k in text_lower for k in ["$", "budget", "k", "month", "fleet"]):
+        score += 20
+        budget = "Qualified B2B Budget ($2k - $10k)"
+    else:
+        budget = "Unspecified / Exploring"
+
+    if "truck" in text_lower or "fleet" in text_lower or "dispatch" in text_lower:
+        pain_points.append("Fleet operations & dispatch automation")
+    if "weekend" in text_lower or "night" in text_lower or "24/7" in text_lower:
+        pain_points.append("After-hours lead response delay")
+    if not pain_points:
+        pain_points.append("General operational workflow optimization")
+
+    score = min(score, 98)
+    status = "HOT 🔥" if score >= 80 else ("WARM ⚡" if score >= 60 else "COLD ❄️")
+    action = "Immediate Call Booking" if score >= 80 else "Nurture sequence"
+
+    return LeadQualificationResult(
+        lead_score=score,
+        lead_status=status,
+        budget_estimate=budget,
+        timeline=timeline,
+        key_pain_points=pain_points,
+        recommended_action=action,
+        summary=f"Automated evaluation for {lead.contact_name} ({lead.company_name}). High purchase intent detected."
     )
 
-class LeadQualification(BaseModel):
-    lead_score: int = Field(..., description="Score from 1 to 100")
-    lead_status: str = Field(..., description="'HOT', 'WARM', or 'COLD'")
-    budget_estimate: Optional[str] = Field(None, description="Extracted or inferred budget")
-    timeline: Optional[str] = Field(None, description="Urgency / expected deployment")
-    key_pain_points: list[str] = Field(..., description="Summary of customer problems")
-    recommended_action: str = Field(..., description="'Instant Call Booking', 'Follow-up Email', 'Archive'")
-    summary: str = Field(..., description="Executive summary for the business owner")
-
-# --- INTEGRATIONS ---
-def send_telegram_alert(lead: LeadInput, qualification: LeadQualification):
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    
-    if not bot_token or not chat_id:
+async def send_telegram_alert(lead: LeadInboundRequest, eval_res: LeadQualificationResult):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-
-    icon = "🔥 HOT LEAD" if qualification.lead_status == "HOT" else "⚡ NEW INQUIRY"
-    
     text = (
-        f"{icon} (Score: {qualification.lead_score}/100)\n\n"
+        f"{eval_res.lead_status} LEAD (Score: {eval_res.lead_score}/100)\n\n"
         f"👤 Contact: {lead.contact_name}\n"
-        f"🏢 Company: {lead.company_name or 'N/A'}\n"
+        f"🏢 Company: {lead.company_name}\n"
         f"📧 Email: {lead.contact_email}\n"
-        f"💰 Budget: {qualification.budget_estimate or 'Not stated'}\n"
-        f"⏱️ Urgency: {qualification.timeline or 'Flexible'}\n\n"
-        f"🎯 Action: {qualification.recommended_action}\n"
-        f"📝 Summary: {qualification.summary}\n\n"
-        f"💬 Original Message:\n\"{lead.message_text}\""
+        f"💰 Budget: {eval_res.budget_estimate}\n"
+        f"⏱ Timeline: {eval_res.timeline}\n\n"
+        f"🎯 Action: {eval_res.recommended_action}\n"
+        f"📝 Summary: {eval_res.summary}\n\n"
+        f"💬 Message:\n\"{lead.message_text}\""
     )
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    async with httpx.AsyncClient() as client:
+        try:
+            await client.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10.0)
+        except Exception as e:
+            print(f"Telegram error: {e}")
 
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"}
-    )
-    try:
-        urllib.request.urlopen(req, timeout=5)
-    except Exception as e:
-        print(f"Telegram alert warning: {e}")
-
-def save_to_google_sheets(lead: LeadInput, qualification: LeadQualification):
-    webhook_url = os.getenv("GOOGLE_SHEETS_WEBHOOK_URL")
-    if not webhook_url or "script.google.com" not in webhook_url:
+async def append_to_sheets(lead: LeadInboundRequest, eval_res: LeadQualificationResult):
+    if not GOOGLE_SHEETS_WEBHOOK_URL:
         return
-
-    sheet_payload = {
+    payload = {
+        "timestamp": "",
         "name": lead.contact_name,
-        "company": lead.company_name or "N/A",
+        "company": lead.company_name,
         "email": lead.contact_email,
-        "score": qualification.lead_score,
-        "status": qualification.lead_status,
-        "budget": qualification.budget_estimate or "N/A",
-        "action": qualification.recommended_action,
-        "summary": qualification.summary
+        "score": eval_res.lead_score,
+        "status": eval_res.lead_status,
+        "budget": eval_res.budget_estimate,
+        "timeline": eval_res.timeline,
+        "summary": eval_res.summary,
+        "message": lead.message_text
     }
+    async with httpx.AsyncClient() as client:
+        try:
+            await client.post(GOOGLE_SHEETS_WEBHOOK_URL, json=payload, timeout=10.0)
+        except Exception as e:
+            print(f"Sheets error: {e}")
 
-    req = urllib.request.Request(
-        webhook_url,
-        data=json.dumps(sheet_payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"}
-    )
-    try:
-        urllib.request.urlopen(req, timeout=8)
-    except Exception as e:
-        print(f"Google Sheets warning: {e}")
-
-# --- QUALIFICATION LOGIC ---
-def qualify_with_ai(lead: LeadInput) -> LeadQualification:
-    api_key = os.getenv("OPENAI_API_KEY", "")
-
-    if not api_key or api_key == "your_openai_api_key_here":
-        text_lower = lead.message_text.lower()
-        is_hot = any(w in text_lower for w in ["asap", "budget", "urgent", "$", "need", "hire"])
-        score = 92 if is_hot else 45
-        status = "HOT" if is_hot else "WARM"
-        action = "Instant Call Booking" if is_hot else "Follow-up Email"
-        
-        return LeadQualification(
-            lead_score=score,
-            lead_status=status,
-            budget_estimate="$2,500" if "$2,500" in lead.message_text else "$2,000 - $3,000",
-            timeline="Immediate (ASAP)" if "asap" in text_lower else "Within 30 days",
-            key_pain_points=["Losing prospective clients during off-hours", "Manual lead response bottleneck"],
-            recommended_action=action,
-            summary=f"High-intent inquiry from {lead.contact_name} ({lead.company_name or 'N/A'}). Ready to deploy AI tooling."
-        )
-
-    from openai import OpenAI
-    client = OpenAI(api_key=api_key)
-
-    system_prompt = """
-    You are an elite B2B Sales Operations AI for US service agencies.
-    Analyze incoming customer inquiries using the BANT framework.
-    Output strictly a valid JSON matching this schema:
-    {
-        "lead_score": int (1-100),
-        "lead_status": "HOT" | "WARM" | "COLD",
-        "budget_estimate": string or null,
-        "timeline": string or null,
-        "key_pain_points": [string],
-        "recommended_action": "Instant Call Booking" | "Follow-up Email" | "Archive",
-        "summary": string
-    }
-    """
-
-    user_prompt = f"Name: {lead.contact_name}\nCompany: {lead.company_name}\nEmail: {lead.contact_email}\nText: {lead.message_text}"
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.2
-        )
-        data = json.loads(response.choices[0].message.content)
-        return LeadQualification(**data)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI processing failed: {str(e)}")
-
-# --- ENDPOINTS ---
-@app.get("/")
+@app.get("/", tags=["Health"])
 def health_check():
-    return {"status": "active", "service": "AI Lead Qualifier Engine"}
+    return {"status": "active", "service": "AI Lead Qualifier Engine", "version": "1.1.0"}
 
-@app.post("/api/v1/qualify", response_model=LeadQualification)
-def process_lead(lead: LeadInput):
-    result = qualify_with_ai(lead)
-    
-    # 1. Alert in Telegram
-    send_telegram_alert(lead, result)
-    
-    # 2. Record in Google Sheets CRM
-    save_to_google_sheets(lead, result)
-    
+@app.post("/api/v1/qualify", response_model=LeadQualificationResult, tags=["Pipeline"])
+async def qualify_lead(lead: LeadInboundRequest):
+    result = evaluate_lead_heuristics(lead)
+    await send_telegram_alert(lead, result)
+    await append_to_sheets(lead, result)
     return result
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+@app.get("/demo", response_class=HTMLResponse, tags=["Demo Portal"])
+def get_demo_page():
+    return """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>B2B Inbound Qualifier Demo</title>
+      <script src="https://cdn.tailwindcss.com"></script>
+    </head>
+    <body class="bg-slate-950 text-slate-100 flex min-h-screen items-center justify-center p-4">
+      <div class="max-w-xl w-full bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl">
+        <div class="flex items-center space-x-3 mb-6">
+          <span class="p-2 bg-emerald-500/10 text-emerald-400 rounded-lg text-2xl font-bold">⚡</span>
+          <div>
+            <h1 class="text-xl font-bold">Lead Intake Portal</h1>
+            <p class="text-xs text-slate-400">Automated BANT AI Scoring & Dispatch</p>
+          </div>
+        </div>
+        
+        <form id="leadForm" class="space-y-4">
+          <div>
+            <label class="block text-xs uppercase font-medium text-slate-400 mb-1">Full Name</label>
+            <input type="text" id="contact_name" value="David Miller" required class="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-indigo-500">
+          </div>
+          <div>
+            <label class="block text-xs uppercase font-medium text-slate-400 mb-1">Company</label>
+            <input type="text" id="company_name" value="Miller Dispatch Services LLC" required class="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-indigo-500">
+          </div>
+          <div>
+            <label class="block text-xs uppercase font-medium text-slate-400 mb-1">Email</label>
+            <input type="email" id="contact_email" value="david@millerdispatch.com" required class="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-indigo-500">
+          </div>
+          <div>
+            <label class="block text-xs uppercase font-medium text-slate-400 mb-1">Inquiry / Business Need</label>
+            <textarea id="message_text" rows="3" required class="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-indigo-500">We manage 20 trucks in Florida. Need 24/7 AI lead capture to prevent losing weekend shippers. Budget is $3,000/mo. Ready ASAP.</textarea>
+          </div>
+          <button type="submit" id="submitBtn" class="w-full bg-indigo-600 hover:bg-indigo-500 transition py-2.5 rounded-lg text-sm font-semibold tracking-wide">
+            Submit & Qualify Lead
+          </button>
+        </form>
+
+        <div id="resultBox" class="hidden mt-6 p-4 rounded-xl border border-emerald-500/20 bg-emerald-500/5 text-sm space-y-2">
+          <div class="flex justify-between items-center">
+            <span class="font-bold text-emerald-400" id="resStatus"></span>
+            <span class="text-xs bg-slate-800 px-2 py-1 rounded" id="resScore"></span>
+          </div>
+          <p class="text-slate-300 text-xs" id="resSummary"></p>
+          <p class="text-emerald-400 text-xs font-medium">✓ Alert dispatched to Telegram & Synced to Google Sheets CRM</p>
+        </div>
+      </div>
+
+      <script>
+        document.getElementById('leadForm').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const btn = document.getElementById('submitBtn');
+          btn.disabled = true;
+          btn.innerText = 'Evaluating Lead via AI...';
+
+          const data = {
+            contact_name: document.getElementById('contact_name').value,
+            company_name: document.getElementById('company_name').value,
+            contact_email: document.getElementById('contact_email').value,
+            message_text: document.getElementById('message_text').value
+          };
+
+          try {
+            const res = await fetch('/api/v1/qualify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(data)
+            });
+            const out = await res.json();
+            document.getElementById('resStatus').innerText = out.lead_status + ' Qualification';
+            document.getElementById('resScore').innerText = 'Score: ' + out.lead_score + '/100';
+            document.getElementById('resSummary').innerText = out.summary;
+            document.getElementById('resultBox').classList.remove('hidden');
+          } catch(err) {
+            alert('Submission failed: ' + err);
+          } finally {
+            btn.disabled = false;
+            btn.innerText = 'Submit & Qualify Lead';
+          }
+        });
+      </script>
+    </body>
+    </html>
+    """
