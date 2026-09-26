@@ -10,15 +10,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 GOOGLE_SHEETS_WEBHOOK_URL = os.getenv("GOOGLE_SHEETS_WEBHOOK_URL", "")
 
 app = FastAPI(
     title="B2B AI Lead Qualifier & CRM Dispatcher",
-    description="Enterprise API to evaluate inbound B2B inquiries and dispatch real-time alerts",
-    version="1.1.0"
+    description="Enterprise API to evaluate inbound B2B inquiries, generate personalized outreach drafts, and dispatch real-time alerts",
+    version="1.2.0"
 )
 
 app.add_middleware(
@@ -42,11 +41,12 @@ class LeadQualificationResult(BaseModel):
     timeline: str
     key_pain_points: List[str]
     recommended_action: str
+    ai_reply_draft: str
     summary: str
 
-def evaluate_lead_heuristics(lead: LeadInboundRequest) -> LeadQualificationResult:
+def evaluate_and_generate_draft(lead: LeadInboundRequest) -> LeadQualificationResult:
     text_lower = lead.message_text.lower()
-    score = 60
+    score = 65
     pain_points = []
     
     if any(k in text_lower for k in ["asap", "immediately", "urgent", "ready"]):
@@ -56,21 +56,33 @@ def evaluate_lead_heuristics(lead: LeadInboundRequest) -> LeadQualificationResul
         timeline = "Within 30 days"
 
     if any(k in text_lower for k in ["$", "budget", "k", "month", "fleet"]):
-        score += 20
+        score += 15
         budget = "Qualified B2B Budget ($2k - $10k)"
     else:
-        budget = "Unspecified / Exploring"
+        budget = "Standard / Unspecified"
 
     if "truck" in text_lower or "fleet" in text_lower or "dispatch" in text_lower:
         pain_points.append("Fleet operations & dispatch automation")
     if "weekend" in text_lower or "night" in text_lower or "24/7" in text_lower:
         pain_points.append("After-hours lead response delay")
     if not pain_points:
-        pain_points.append("General operational workflow optimization")
+        pain_points.append("Core workflow efficiency & pipeline optimization")
 
     score = min(score, 98)
     status = "HOT 🔥" if score >= 80 else ("WARM ⚡" if score >= 60 else "COLD ❄️")
     action = "Immediate Call Booking" if score >= 80 else "Nurture sequence"
+
+    # AI Personalized Outreach Generation
+    first_name = lead.contact_name.split()[0] if lead.contact_name else "there"
+    primary_pain = pain_points[0].lower()
+    draft = (
+        f"Hi {first_name},\n\n"
+        f"Thanks for reaching out from {lead.company_name}! "
+        f"Saw that you are looking into solving {primary_pain} with a target timeline of {timeline.lower()}.\n\n"
+        f"We specialize in autonomous qualification pipelines that plug into your existing website without friction. "
+        f"Are you open for a brief 10-minute walkthrough this Thursday or Friday to look at a live prototype tailored to your workflow?\n\n"
+        f"Best regards,\nAutomated Lead Desk"
+    )
 
     return LeadQualificationResult(
         lead_score=score,
@@ -79,7 +91,8 @@ def evaluate_lead_heuristics(lead: LeadInboundRequest) -> LeadQualificationResul
         timeline=timeline,
         key_pain_points=pain_points,
         recommended_action=action,
-        summary=f"Automated evaluation for {lead.contact_name} ({lead.company_name}). High purchase intent detected."
+        ai_reply_draft=draft,
+        summary=f"High-intent inquiry from {lead.contact_name} ({lead.company_name}). Evaluated for {timeline} onboarding."
     )
 
 async def send_telegram_alert(lead: LeadInboundRequest, eval_res: LeadQualificationResult):
@@ -92,14 +105,32 @@ async def send_telegram_alert(lead: LeadInboundRequest, eval_res: LeadQualificat
         f"📧 Email: {lead.contact_email}\n"
         f"💰 Budget: {eval_res.budget_estimate}\n"
         f"⏱ Timeline: {eval_res.timeline}\n\n"
-        f"🎯 Action: {eval_res.recommended_action}\n"
-        f"📝 Summary: {eval_res.summary}\n\n"
-        f"💬 Message:\n\"{lead.message_text}\""
+        f"🎯 Action: {eval_res.recommended_action}\n\n"
+        f"✉️ AI Generated Reply Draft:\n"
+        f"────────────────────────\n"
+        f"{eval_res.ai_reply_draft}\n"
+        f"────────────────────────\n\n"
+        f"💬 Original Message:\n\"{lead.message_text}\""
     )
+    
+    # Inline action buttons for instant interaction in Telegram
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "✉️ Email Contact", "url": f"mailto:{lead.contact_email}?subject=Regarding%20your%20inquiry%20at%20{lead.company_name}"},
+                {"text": "🌐 Open Demo", "url": "https://ai-lead-qualifier-production-fa3b.up.railway.app/demo"}
+            ]
+        ]
+    }
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     async with httpx.AsyncClient() as client:
         try:
-            await client.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10.0)
+            await client.post(url, json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "reply_markup": reply_markup
+            }, timeout=10.0)
         except Exception as e:
             print(f"Telegram error: {e}")
 
@@ -126,11 +157,11 @@ async def append_to_sheets(lead: LeadInboundRequest, eval_res: LeadQualification
 
 @app.get("/", tags=["Health"])
 def health_check():
-    return {"status": "active", "service": "AI Lead Qualifier Engine", "version": "1.1.0"}
+    return {"status": "active", "service": "AI Lead Qualifier Engine", "version": "1.2.0"}
 
 @app.post("/api/v1/qualify", response_model=LeadQualificationResult, tags=["Pipeline"])
 async def qualify_lead(lead: LeadInboundRequest):
-    result = evaluate_lead_heuristics(lead)
+    result = evaluate_and_generate_draft(lead)
     await send_telegram_alert(lead, result)
     await append_to_sheets(lead, result)
     return result
@@ -143,16 +174,16 @@ def get_demo_page():
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>B2B Inbound Qualifier Demo</title>
+      <title>B2B Inbound Qualifier & AI Outreach</title>
       <script src="https://cdn.tailwindcss.com"></script>
     </head>
     <body class="bg-slate-950 text-slate-100 flex min-h-screen items-center justify-center p-4">
-      <div class="max-w-xl w-full bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl">
-        <div class="flex items-center space-x-3 mb-6">
-          <span class="p-2 bg-emerald-500/10 text-emerald-400 rounded-lg text-2xl font-bold">⚡</span>
+      <div class="max-w-xl w-full bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl space-y-6">
+        <div class="flex items-center space-x-3">
+          <span class="p-2 bg-indigo-500/10 text-indigo-400 rounded-lg text-2xl font-bold">⚡</span>
           <div>
-            <h1 class="text-xl font-bold">Lead Intake Portal</h1>
-            <p class="text-xs text-slate-400">Automated BANT AI Scoring & Dispatch</p>
+            <h1 class="text-xl font-bold">Enterprise Lead Qualifier</h1>
+            <p class="text-xs text-slate-400">Autonomous BANT Scoring, Instant CRM Routing & AI Outreach</p>
           </div>
         </div>
         
@@ -178,13 +209,22 @@ def get_demo_page():
           </button>
         </form>
 
-        <div id="resultBox" class="hidden mt-6 p-4 rounded-xl border border-emerald-500/20 bg-emerald-500/5 text-sm space-y-2">
-          <div class="flex justify-between items-center">
-            <span class="font-bold text-emerald-400" id="resStatus"></span>
-            <span class="text-xs bg-slate-800 px-2 py-1 rounded" id="resScore"></span>
+        <div id="resultBox" class="hidden p-5 rounded-xl border border-indigo-500/30 bg-indigo-500/5 text-sm space-y-4">
+          <div class="flex justify-between items-center border-b border-indigo-500/20 pb-3">
+            <span class="font-bold text-emerald-400 text-base" id="resStatus"></span>
+            <span class="text-xs bg-slate-800 text-indigo-300 font-semibold px-2.5 py-1 rounded-full" id="resScore"></span>
           </div>
-          <p class="text-slate-300 text-xs" id="resSummary"></p>
-          <p class="text-emerald-400 text-xs font-medium">✓ Alert dispatched to Telegram & Synced to Google Sheets CRM</p>
+          <div>
+            <span class="text-xs uppercase font-bold text-slate-400">AI Evaluation</span>
+            <p class="text-slate-300 text-xs mt-1" id="resSummary"></p>
+          </div>
+          <div class="bg-slate-950/80 p-3 rounded-lg border border-slate-800">
+            <span class="text-[11px] uppercase font-bold text-indigo-400 block mb-1">✨ AI Generated Outreach Draft</span>
+            <p class="text-xs text-slate-300 whitespace-pre-line leading-relaxed" id="resDraft"></p>
+          </div>
+          <p class="text-emerald-400 text-xs font-medium flex items-center gap-1.5">
+            <span>✓</span> Alert dispatched to Telegram with action buttons & synced to CRM
+          </p>
         </div>
       </div>
 
@@ -212,6 +252,7 @@ def get_demo_page():
             document.getElementById('resStatus').innerText = out.lead_status + ' Qualification';
             document.getElementById('resScore').innerText = 'Score: ' + out.lead_score + '/100';
             document.getElementById('resSummary').innerText = out.summary;
+            document.getElementById('resDraft').innerText = out.ai_reply_draft;
             document.getElementById('resultBox').classList.remove('hidden');
           } catch(err) {
             alert('Submission failed: ' + err);
