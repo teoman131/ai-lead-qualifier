@@ -106,12 +106,33 @@ async def send_telegram_alert(lead: LeadInboundRequest, eval_res: LeadQualificat
         f"💰 Budget: {eval_res.budget_estimate}\n"
         f"⏱ Timeline: {eval_res.timeline}\n\n"
         f"🎯 Action: {eval_res.recommended_action}\n\n"
-        f"✉️ AI Generated Reply Draft:\n"
+        f"✨ AI Generated Reply Draft:\n"
         f"────────────────────────\n"
         f"{eval_res.ai_reply_draft}\n"
         f"────────────────────────\n\n"
         f"💬 Original Message:\n\"{lead.message_text}\""
     )
+    
+    # Telegram strictly requires http:// or https:// in inline keyboard URLs
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "🌐 View Live Demo Portal", "url": "https://ai-lead-qualifier-production-fa3b.up.railway.app/demo"}
+            ]
+        ]
+    }
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.post(url, json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "reply_markup": reply_markup
+            }, timeout=10.0)
+            print("Telegram response status:", resp.status_code, resp.text)
+        except Exception as e:
+            print(f"Telegram error: {e}")
     
     # Inline action buttons for instant interaction in Telegram
     reply_markup = {
