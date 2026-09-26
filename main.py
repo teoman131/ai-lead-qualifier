@@ -1,8 +1,9 @@
 import os
-import json
+import re
+import urllib.parse
 import httpx
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -13,11 +14,12 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 GOOGLE_SHEETS_WEBHOOK_URL = os.getenv("GOOGLE_SHEETS_WEBHOOK_URL", "")
+SPREADSHEET_URL = os.getenv("GOOGLE_SHEETS_SPREADSHEET_URL", "https://docs.google.com/spreadsheets")
 
 app = FastAPI(
-    title="B2B AI Lead Qualifier & CRM Dispatcher",
-    description="Enterprise API to evaluate inbound B2B inquiries, generate personalized outreach drafts, and dispatch real-time alerts",
-    version="1.2.0"
+    title="B2B AI Lead Qualifier & Multi-Channel Dispatcher",
+    description="Enterprise API to evaluate leads, generate AI outreach, and trigger 1-tap WhatsApp/Telegram/Email actions",
+    version="1.3.0"
 )
 
 app.add_middleware(
@@ -29,10 +31,12 @@ app.add_middleware(
 )
 
 class LeadInboundRequest(BaseModel):
-    contact_name: str = Field(..., example="Michael Vance")
-    contact_email: str = Field(..., example="mvance@apexlogistics.com")
-    company_name: str = Field(..., example="Apex Global Freight")
-    message_text: str = Field(..., example="Need 24/7 AI dispatching for our 25 trucks fleet. Budget is around $4,000/mo. Ready to start immediately.")
+    contact_name: str = Field(..., example="Дмитрий Волков")
+    contact_phone: Optional[str] = Field(None, example="+79991234567")
+    contact_email: Optional[str] = Field(None, example="dmitry@logistics.ru")
+    telegram_handle: Optional[str] = Field(None, example="@dmitry_flow")
+    company_name: Optional[str] = Field("Не указано", example="Волков Логистик")
+    message_text: str = Field(..., example="Нужно срочно подключить AI-обработку лидов для 15 машин. Бюджет 50 000 руб/мес.")
 
 class LeadQualificationResult(BaseModel):
     lead_score: int
@@ -44,44 +48,49 @@ class LeadQualificationResult(BaseModel):
     ai_reply_draft: str
     summary: str
 
-def evaluate_and_generate_draft(lead: LeadInboundRequest) -> LeadQualificationResult:
+def clean_phone_number(raw_phone: Optional[str]) -> str:
+    if not raw_phone:
+        return ""
+    digits = re.sub(r"[^\d]", "", raw_phone)
+    if digits.startswith("8") and len(digits) == 11:
+        digits = "7" + digits[1:]
+    return digits
+
+def evaluate_lead(lead: LeadInboundRequest) -> LeadQualificationResult:
     text_lower = lead.message_text.lower()
     score = 65
     pain_points = []
     
-    if any(k in text_lower for k in ["asap", "immediately", "urgent", "ready"]):
+    if any(k in text_lower for k in ["срочно", "asap", "быстро", "горят", "urgent", "сегодня", "сейчас"]):
         score += 15
-        timeline = "Immediate (0-7 days)"
+        timeline = "Срочно (до 7 дней)"
     else:
-        timeline = "Within 30 days"
+        timeline = "В течение месяца"
 
-    if any(k in text_lower for k in ["$", "budget", "k", "month", "fleet"]):
+    if any(k in text_lower for k in ["руб", "₽", "$", "бюджет", "budget", "тысяч", "к", "оплата"]):
         score += 15
-        budget = "Qualified B2B Budget ($2k - $10k)"
+        budget = "Подтвержденный бюджет"
     else:
-        budget = "Standard / Unspecified"
+        budget = "Не уточнен"
 
-    if "truck" in text_lower or "fleet" in text_lower or "dispatch" in text_lower:
-        pain_points.append("Fleet operations & dispatch automation")
-    if "weekend" in text_lower or "night" in text_lower or "24/7" in text_lower:
-        pain_points.append("After-hours lead response delay")
+    if any(k in text_lower for k in ["лид", "заявк", "клиент", "сайт", "трафик", "конверси"]):
+        pain_points.append("Потеря входящих лидов и конверсия сайта")
+    if any(k in text_lower for k in ["ноч", "выходн", "24/7", "долго", "менеджер"]):
+        pain_points.append("Медленный ответ менеджеров вне рабочего времени")
     if not pain_points:
-        pain_points.append("Core workflow efficiency & pipeline optimization")
+        pain_points.append("Автоматизация клиентского сервиса")
 
     score = min(score, 98)
     status = "HOT 🔥" if score >= 80 else ("WARM ⚡" if score >= 60 else "COLD ❄️")
-    action = "Immediate Call Booking" if score >= 80 else "Nurture sequence"
+    action = "Срочный звонок / написать за 5 мин" if score >= 80 else "Стандартная обработка"
 
-    # AI Personalized Outreach Generation
-    first_name = lead.contact_name.split()[0] if lead.contact_name else "there"
-    primary_pain = pain_points[0].lower()
+    name_clean = lead.contact_name.split()[0] if lead.contact_name else "Здравствуйте"
+    pain_text = pain_points[0].lower()
     draft = (
-        f"Hi {first_name},\n\n"
-        f"Thanks for reaching out from {lead.company_name}! "
-        f"Saw that you are looking into solving {primary_pain} with a target timeline of {timeline.lower()}.\n\n"
-        f"We specialize in autonomous qualification pipelines that plug into your existing website without friction. "
-        f"Are you open for a brief 10-minute walkthrough this Thursday or Friday to look at a live prototype tailored to your workflow?\n\n"
-        f"Best regards,\nAutomated Lead Desk"
+        f"Здравствуйте, {name_clean}!\n\n"
+        f"Увидели ваше обращение по поводу {pain_text}. "
+        f"Мы можем развернуть готовую автоматизацию под ваш проект за 48 часов.\n\n"
+        f"Удобно сейчас созвониться на 5 минут или показать демо прямо в мессенджере?"
     )
 
     return LeadQualificationResult(
@@ -92,65 +101,60 @@ def evaluate_and_generate_draft(lead: LeadInboundRequest) -> LeadQualificationRe
         key_pain_points=pain_points,
         recommended_action=action,
         ai_reply_draft=draft,
-        summary=f"High-intent inquiry from {lead.contact_name} ({lead.company_name}). Evaluated for {timeline} onboarding."
+        summary=f"Лид: {lead.contact_name} ({lead.company_name or 'Частное лицо'}). Оценка: {timeline}."
     )
 
 async def send_telegram_alert(lead: LeadInboundRequest, eval_res: LeadQualificationResult):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
+    
+    clean_phone = clean_phone_number(lead.contact_phone)
+    encoded_draft = urllib.parse.quote(eval_res.ai_reply_draft)
+    
     text = (
-        f"{eval_res.lead_status} LEAD (Score: {eval_res.lead_score}/100)\n\n"
-        f"👤 Contact: {lead.contact_name}\n"
-        f"🏢 Company: {lead.company_name}\n"
-        f"📧 Email: {lead.contact_email}\n"
-        f"💰 Budget: {eval_res.budget_estimate}\n"
-        f"⏱ Timeline: {eval_res.timeline}\n\n"
-        f"🎯 Action: {eval_res.recommended_action}\n\n"
-        f"✨ AI Generated Reply Draft:\n"
+        f"{eval_res.lead_status} НОВЫЙ ЛИД (Скоринг: {eval_res.lead_score}/100)\n\n"
+        f"👤 Клиент: {lead.contact_name}\n"
+        f"🏢 Компания: {lead.company_name or '—'}\n"
+        f"📞 Телефон: {lead.contact_phone or '—'}\n"
+        f"📧 Email: {lead.contact_email or '—'}\n"
+        f"✈️ Telegram: {lead.telegram_handle or '—'}\n"
+        f"💰 Бюджет: {eval_res.budget_estimate}\n"
+        f"⏱ Сроки: {eval_res.timeline}\n\n"
+        f"🎯 Рекомендация: {eval_res.recommended_action}\n\n"
+        f"✨ Готовый AI-ответ для клиента:\n"
         f"────────────────────────\n"
         f"{eval_res.ai_reply_draft}\n"
         f"────────────────────────\n\n"
-        f"💬 Original Message:\n\"{lead.message_text}\""
+        f"💬 Сообщение клиента:\n\"{lead.message_text}\""
     )
+
+    buttons = []
     
-    # Telegram strictly requires http:// or https:// in inline keyboard URLs
-    reply_markup = {
-        "inline_keyboard": [
-            [
-                {"text": "🌐 View Live Demo Portal", "url": "https://ai-lead-qualifier-production-fa3b.up.railway.app/demo"}
-            ]
-        ]
-    }
+    # 1. Кнопка WhatsApp (открывает чат со вбитым текстом)
+    if clean_phone:
+        buttons.append([{"text": "💬 Написать в WhatsApp", "url": f"https://wa.me/{clean_phone}?text={encoded_draft}"}])
     
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    async with httpx.AsyncClient() as client:
-        try:
-            resp = await client.post(url, json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text,
-                "reply_markup": reply_markup
-            }, timeout=10.0)
-            print("Telegram response status:", resp.status_code, resp.text)
-        except Exception as e:
-            print(f"Telegram error: {e}")
+    # 2. Кнопка Telegram (если передан юзернейм)
+    if lead.telegram_handle:
+        tg_nick = lead.telegram_handle.replace("@", "").strip()
+        buttons.append([{"text": "✈️ Написать в Telegram", "url": f"https://t.me/{tg_nick}"}])
+
+    # 3. Кнопка Gmail и CRM
+    row_actions = []
+    if lead.contact_email:
+        gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={lead.contact_email}&su=Заявка+{urllib.parse.quote(lead.company_name or '')}"
+        row_actions.append({"text": "✉️ Email (Gmail)", "url": gmail_url})
     
-    # Inline action buttons for instant interaction in Telegram
-    reply_markup = {
-        "inline_keyboard": [
-            [
-                {"text": "✉️ Email Contact", "url": f"mailto:{lead.contact_email}?subject=Regarding%20your%20inquiry%20at%20{lead.company_name}"},
-                {"text": "🌐 Open Demo", "url": "https://ai-lead-qualifier-production-fa3b.up.railway.app/demo"}
-            ]
-        ]
-    }
-    
+    row_actions.append({"text": "📊 CRM Таблица", "url": SPREADSHEET_URL})
+    buttons.append(row_actions)
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     async with httpx.AsyncClient() as client:
         try:
             await client.post(url, json={
                 "chat_id": TELEGRAM_CHAT_ID,
                 "text": text,
-                "reply_markup": reply_markup
+                "reply_markup": {"inline_keyboard": buttons}
             }, timeout=10.0)
         except Exception as e:
             print(f"Telegram error: {e}")
@@ -161,8 +165,10 @@ async def append_to_sheets(lead: LeadInboundRequest, eval_res: LeadQualification
     payload = {
         "timestamp": "",
         "name": lead.contact_name,
-        "company": lead.company_name,
-        "email": lead.contact_email,
+        "phone": lead.contact_phone or "",
+        "telegram": lead.telegram_handle or "",
+        "company": lead.company_name or "",
+        "email": lead.contact_email or "",
         "score": eval_res.lead_score,
         "status": eval_res.lead_status,
         "budget": eval_res.budget_estimate,
@@ -178,73 +184,118 @@ async def append_to_sheets(lead: LeadInboundRequest, eval_res: LeadQualification
 
 @app.get("/", tags=["Health"])
 def health_check():
-    return {"status": "active", "service": "AI Lead Qualifier Engine", "version": "1.2.0"}
+    return {"status": "active", "service": "AI Lead Qualifier & Dispatcher", "version": "1.3.0"}
 
 @app.post("/api/v1/qualify", response_model=LeadQualificationResult, tags=["Pipeline"])
 async def qualify_lead(lead: LeadInboundRequest):
-    result = evaluate_and_generate_draft(lead)
+    result = evaluate_lead(lead)
     await send_telegram_alert(lead, result)
     await append_to_sheets(lead, result)
     return result
+
+@app.post("/api/v1/webhook/form", tags=["Universal Webhook"])
+async def form_webhook(request: Request):
+    """Универсальный приемщик заявок с Tilda, WordPress, Elementor или обычных HTML-форм"""
+    body = await request.body()
+    try:
+        data = await request.json()
+    except Exception:
+        data = dict(urllib.parse.parse_qsl(body.decode("utf-8")))
+
+    name = data.get("Name") or data.get("name") or data.get("fio") or "Новый клиент"
+    phone = data.get("Phone") or data.get("phone") or data.get("tel") or ""
+    email = data.get("Email") or data.get("email") or ""
+    tg = data.get("telegram") or data.get("tg") or ""
+    company = data.get("company") or data.get("Company") or "С сайта"
+    msg = data.get("message") or data.get("text") or data.get("comment") or "Запрос с сайта"
+
+    lead = LeadInboundRequest(
+        contact_name=str(name),
+        contact_phone=str(phone),
+        contact_email=str(email),
+        telegram_handle=str(tg),
+        company_name=str(company),
+        message_text=str(msg)
+    )
+    result = evaluate_lead(lead)
+    await send_telegram_alert(lead, result)
+    await append_to_sheets(lead, result)
+    return {"status": "ok", "lead_score": result.lead_score, "lead_status": result.lead_status}
 
 @app.get("/demo", response_class=HTMLResponse, tags=["Demo Portal"])
 def get_demo_page():
     return """
     <!DOCTYPE html>
-    <html lang="en">
+    <html lang="ru">
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>B2B Inbound Qualifier & AI Outreach</title>
+      <title>B2B AI Lead Qualifier & Multi-Channel Actions</title>
       <script src="https://cdn.tailwindcss.com"></script>
     </head>
     <body class="bg-slate-950 text-slate-100 flex min-h-screen items-center justify-center p-4">
-      <div class="max-w-xl w-full bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl space-y-6">
+      <div class="max-w-xl w-full bg-slate-900 border border-slate-800 rounded-2xl p-7 shadow-2xl space-y-5">
         <div class="flex items-center space-x-3">
-          <span class="p-2 bg-indigo-500/10 text-indigo-400 rounded-lg text-2xl font-bold">⚡</span>
+          <span class="p-2.5 bg-indigo-500/10 text-indigo-400 rounded-xl text-2xl font-bold">⚡</span>
           <div>
-            <h1 class="text-xl font-bold">Enterprise Lead Qualifier</h1>
-            <p class="text-xs text-slate-400">Autonomous BANT Scoring, Instant CRM Routing & AI Outreach</p>
+            <h1 class="text-xl font-bold">Входящая заявка с сайта</h1>
+            <p class="text-xs text-slate-400">Мгновенный AI-скоринг и быстрая связь в WhatsApp / TG</p>
           </div>
         </div>
         
-        <form id="leadForm" class="space-y-4">
-          <div>
-            <label class="block text-xs uppercase font-medium text-slate-400 mb-1">Full Name</label>
-            <input type="text" id="contact_name" value="David Miller" required class="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-indigo-500">
+        <form id="leadForm" class="space-y-3.5">
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs uppercase font-medium text-slate-400 mb-1">Имя</label>
+              <input type="text" id="contact_name" value="Алексей Смирнов" required class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
+            </div>
+            <div>
+              <label class="block text-xs uppercase font-medium text-slate-400 mb-1">Компания</label>
+              <input type="text" id="company_name" value="Смирнов Карго" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
+            </div>
           </div>
-          <div>
-            <label class="block text-xs uppercase font-medium text-slate-400 mb-1">Company</label>
-            <input type="text" id="company_name" value="Miller Dispatch Services LLC" required class="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-indigo-500">
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs uppercase font-medium text-slate-400 mb-1">Телефон (WhatsApp)</label>
+              <input type="text" id="contact_phone" value="+7 999 123-45-67" required class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
+            </div>
+            <div>
+              <label class="block text-xs uppercase font-medium text-slate-400 mb-1">Telegram (юзернейм)</label>
+              <input type="text" id="telegram_handle" value="@alex_cargo" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
+            </div>
           </div>
+
           <div>
             <label class="block text-xs uppercase font-medium text-slate-400 mb-1">Email</label>
-            <input type="email" id="contact_email" value="david@millerdispatch.com" required class="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-indigo-500">
+            <input type="email" id="contact_email" value="alex@cargo.ru" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">
           </div>
+
           <div>
-            <label class="block text-xs uppercase font-medium text-slate-400 mb-1">Inquiry / Business Need</label>
-            <textarea id="message_text" rows="3" required class="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-indigo-500">We manage 20 trucks in Florida. Need 24/7 AI lead capture to prevent losing weekend shippers. Budget is $3,000/mo. Ready ASAP.</textarea>
+            <label class="block text-xs uppercase font-medium text-slate-400 mb-1">Запрос клиента</label>
+            <textarea id="message_text" rows="3" required class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500">Срочно нужен бот для обработки заявок по грузоперевозкам на выходных. Теряем лиды. Бюджет 45 000 руб в месяц.</textarea>
           </div>
+
           <button type="submit" id="submitBtn" class="w-full bg-indigo-600 hover:bg-indigo-500 transition py-2.5 rounded-lg text-sm font-semibold tracking-wide">
-            Submit & Qualify Lead
+            Отправить заявку в систему
           </button>
         </form>
 
-        <div id="resultBox" class="hidden p-5 rounded-xl border border-indigo-500/30 bg-indigo-500/5 text-sm space-y-4">
-          <div class="flex justify-between items-center border-b border-indigo-500/20 pb-3">
+        <div id="resultBox" class="hidden p-4 rounded-xl border border-indigo-500/30 bg-indigo-500/5 text-sm space-y-3">
+          <div class="flex justify-between items-center border-b border-indigo-500/20 pb-2.5">
             <span class="font-bold text-emerald-400 text-base" id="resStatus"></span>
             <span class="text-xs bg-slate-800 text-indigo-300 font-semibold px-2.5 py-1 rounded-full" id="resScore"></span>
           </div>
           <div>
-            <span class="text-xs uppercase font-bold text-slate-400">AI Evaluation</span>
+            <span class="text-xs uppercase font-bold text-slate-400">Оценка ИИ</span>
             <p class="text-slate-300 text-xs mt-1" id="resSummary"></p>
           </div>
           <div class="bg-slate-950/80 p-3 rounded-lg border border-slate-800">
-            <span class="text-[11px] uppercase font-bold text-indigo-400 block mb-1">✨ AI Generated Outreach Draft</span>
+            <span class="text-[11px] uppercase font-bold text-indigo-400 block mb-1">✨ Готовый черновик ответа</span>
             <p class="text-xs text-slate-300 whitespace-pre-line leading-relaxed" id="resDraft"></p>
           </div>
           <p class="text-emerald-400 text-xs font-medium flex items-center gap-1.5">
-            <span>✓</span> Alert dispatched to Telegram with action buttons & synced to CRM
+            <span>✓</span> Карточка отправлена в Telegram с кнопками прямого ответа клиенту
           </p>
         </div>
       </div>
@@ -254,11 +305,13 @@ def get_demo_page():
           e.preventDefault();
           const btn = document.getElementById('submitBtn');
           btn.disabled = true;
-          btn.innerText = 'Evaluating Lead via AI...';
+          btn.innerText = 'Обработка и скоринг...';
 
           const data = {
             contact_name: document.getElementById('contact_name').value,
             company_name: document.getElementById('company_name').value,
+            contact_phone: document.getElementById('contact_phone').value,
+            telegram_handle: document.getElementById('telegram_handle').value,
             contact_email: document.getElementById('contact_email').value,
             message_text: document.getElementById('message_text').value
           };
@@ -270,16 +323,16 @@ def get_demo_page():
               body: JSON.stringify(data)
             });
             const out = await res.json();
-            document.getElementById('resStatus').innerText = out.lead_status + ' Qualification';
-            document.getElementById('resScore').innerText = 'Score: ' + out.lead_score + '/100';
+            document.getElementById('resStatus').innerText = out.lead_status + ' Скоринг';
+            document.getElementById('resScore').innerText = 'Балл: ' + out.lead_score + '/100';
             document.getElementById('resSummary').innerText = out.summary;
             document.getElementById('resDraft').innerText = out.ai_reply_draft;
             document.getElementById('resultBox').classList.remove('hidden');
           } catch(err) {
-            alert('Submission failed: ' + err);
+            alert('Ошибка отправки: ' + err);
           } finally {
             btn.disabled = false;
-            btn.innerText = 'Submit & Qualify Lead';
+            btn.innerText = 'Отправить заявку в систему';
           }
         });
       </script>
