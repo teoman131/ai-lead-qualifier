@@ -42,20 +42,21 @@ An enterprise-ready AI microservice designed for high-velocity B2B service compa
 ## 🚀 Quick Start
 
 ### 1. Clone & Setup
-git clone https://github.com/teoman131/ai-lead-qualifier.git
-cd ai-lead-qualifier
-pip install -r requirements.txt
+    git clone https://github.com/teoman131/ai-lead-qualifier.git
+    cd ai-lead-qualifier
+    pip install -r requirements.txt
 
 ### 2. Environment Variables
 Create a `.env` file in the root folder:
-TELEGRAM_BOT_TOKEN="your_bot_token"
-TELEGRAM_CHAT_ID="your_default_chat_id"
-CRM_WEBHOOK_URL="optional_google_sheets_webhook_url"
+
+    TELEGRAM_BOT_TOKEN="your_bot_token"
+    TELEGRAM_CHAT_ID="your_default_chat_id"
+    CRM_WEBHOOK_URL="optional_google_sheets_webhook_url"
 
 ### 3. Run Locally
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
-Visit `http://localhost:8000/demo` for the test portal or `http://localhost:8000/docs` for Swagger UI.
+Visit `http://127.0.0.1:8000/demo` for the test portal or `http://127.0.0.1:8000/docs` for Swagger UI.
 
 ---
 
@@ -63,4 +64,5 @@ Visit `http://localhost:8000/demo` for the test portal or `http://localhost:8000
 
 To connect an external website form to a specific Telegram chat, submit lead data via POST to:
 
+    https://ai-lead-qualifier-production-fa3b.up.railway.app/api/v1/webhook/form?chat_id=YOUR_CLIENT_CHAT_ID&company_name=SpecTechnika147
 https://ai-lead-qualifier-production-fa3b.up.railway.app/api/v1/webhook/form?chat_id=YOUR_CLIENT_CHAT_ID&company_name=SpecTechnika147
