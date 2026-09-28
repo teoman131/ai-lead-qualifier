@@ -1,27 +1,66 @@
-# B2B AI Inbound Lead Qualifier & Automated CRM Dispatcher
+# ⚡ AI B2B Lead Qualifier & Multi-Tenant Routing Engine
 
-An enterprise-ready AI microservice designed for high-velocity US service companies (logistics, roofing, commercial contractors, marketing agencies) to instantly qualify inbound customer inquiries, score purchasing intent, and sync records into sales pipelines in real-time.
+![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)
+![FastAPI](https://img.shields.io/badge/FastAPI-Production%20Ready-009688.svg)
+![Railway](https://img.shields.io/badge/Railway-Deployed-success.svg)
+![License](https://img.shields.io/badge/License-MIT-green.svg)
 
-## Business Impact
-- **Instant Response SLA:** Cuts response time from hours to under 3 seconds.
-- **Cost Reduction:** Eliminates 15+ hours/week of manual qualification performed by sales reps.
-- **Conversion Uplift:** Flags high-intent enterprise buyers ($2k-$10k+ budget) and triggers immediate routing to stakeholders.
+An enterprise-ready AI microservice designed for high-velocity B2B service companies (logistics, equipment rental, construction, legal) to instantly qualify inbound customer inquiries, score purchasing intent using BANT heuristics, and trigger 1-tap WhatsApp/Telegram follow-ups.
 
-## Architecture & Data Flow
-1. **Intake:** Inbound lead submissions via REST API (`/api/v1/qualify`).
-2. **AI Evaluation:** BANT-framework scoring (Budget, Authority, Need, Urgency) powered by LLM JSON Mode.
-3. **Instant Telegram Alert:** Immediate notification sent to the business owner/account executive for HOT opportunities.
-4. **CRM Sync:** Real-time append to Google Sheets CRM pipeline via serverless webhook.
+🚀 **Live Interactive Demo:** https://ai-lead-qualifier-production-fa3b.up.railway.app/demo
 
-## Tech Stack
-- **Backend:** Python 3.11+, FastAPI, Pydantic v2, Uvicorn
-- **AI Engine:** OpenAI GPT-4o-mini (structured JSON output)
-- **Integrations:** Telegram Bot API, Google Apps Script / Google Sheets Webhook
+---
 
-## Quick Start
+## 💼 Business Impact
 
-### 1. Clone & Install
-```bash
-git clone [https://github.com/your-username/ai-lead-qualifier.git](https://github.com/your-username/ai-lead-qualifier.git)
+- **Instant Response SLA:** Reduces lead reaction time from hours to under 3 seconds.
+- **1-Tap WhatsApp Closing:** Equips sales reps with pre-generated AI response drafts and direct deep-links (`wa.me` / `t.me`).
+- **Multi-Tenant Routing:** Connect multiple client websites to a single backend cluster using dynamic webhook parameters (`?chat_id=...`).
+- **Conversion Uplift:** Prioritizes high-ticket enterprise buyers and eliminates manual triage overhead.
+
+---
+
+## 🏗 System Architecture & Workflow
+
+- **Inbound Lead Form** (Tilda, WordPress, Webhook)
+  └──> **FastAPI Gateway** (/api/v1/webhook/form)
+       └──> **BANT Heuristic & AI Scoring**
+            ├──> **Telegram 1-Tap Action Card** (WhatsApp, Telegram, Gmail direct links)
+            └──> **Google Sheets / CRM Webhook Sync**
+
+---
+
+## 🛠 Tech Stack
+
+- **Backend:** Python 3.11, FastAPI, Pydantic v2, Uvicorn, HTTPX
+- **Cloud Infrastructure:** Railway PaaS (24/7 Production Deploy)
+- **Frontend Demo:** Tailwind CSS Responsive Sandbox (`/demo`)
+- **Integrations:** Telegram Bot API, WhatsApp Deep Linking, Google Sheets CRM Webhooks
+
+---
+
+## 🚀 Quick Start
+
+### 1. Clone & Setup
+git clone https://github.com/teoman131/ai-lead-qualifier.git
 cd ai-lead-qualifier
 pip install -r requirements.txt
+
+### 2. Environment Variables
+Create a `.env` file in the root folder:
+TELEGRAM_BOT_TOKEN="your_bot_token"
+TELEGRAM_CHAT_ID="your_default_chat_id"
+CRM_WEBHOOK_URL="optional_google_sheets_webhook_url"
+
+### 3. Run Locally
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+Visit `http://localhost:8000/demo` for the test portal or `http://localhost:8000/docs` for Swagger UI.
+
+---
+
+## 🌐 Multi-Tenant Integration Example
+
+To connect an external website form to a specific Telegram chat, submit lead data via POST to:
+
+https://ai-lead-qualifier-production-fa3b.up.railway.app/api/v1/webhook/form?chat_id=YOUR_CLIENT_CHAT_ID&company_name=SpecTechnika147
